@@ -264,6 +264,15 @@ function windOutputKw(speed, capacityKw, cutIn = DEFAULT_WIND_CUT_IN_MS, rated =
   return capacityKw * Math.pow((speed - cutIn) / (rated - cutIn), 3);
 }
 
+// Solar PV panel response: linear ramp from 0 up to `saturation` W/m²,
+// clamped at rated capacity above that — mirrors the inline formula
+// runDispatch already used, pulled out so the Renewables page can trace
+// the same curve for any irradiance value (not just simulated steps).
+const DEFAULT_PV_SATURATION_WM2 = 800;
+function pvOutputKw(irradiance, capacityKw, saturation = DEFAULT_PV_SATURATION_WM2) {
+  return Math.min(Math.max(irradiance / saturation, 0), 1) * capacityKw;
+}
+
 function runDispatch(env, config, { windOn, solarOn }, params = {}) {
   const {
     socMin = DEFAULT_SOC_MIN, socMax = DEFAULT_SOC_MAX,
@@ -291,7 +300,7 @@ function runDispatch(env, config, { windOn, solarOn }, params = {}) {
   let soc = 0.6;
 
   for (let i = 0; i < n; i++) {
-    pv[i] = solarOn ? Math.min(Math.max(env.irradiance[i] / 800, 0), 1) * config.pvCapacity : 0;
+    pv[i] = solarOn ? pvOutputKw(env.irradiance[i], config.pvCapacity) : 0;
     wind[i] = windOn ? windOutputKw(env.windSpeed[i], config.windCapacity, windCutIn, windRated, windCutOut) : 0;
 
     const renewables = pv[i] + wind[i]; // kW — instantaneous/average power for this step
@@ -805,6 +814,19 @@ export default function PolarTwinDashboard() {
     return pts;
   }, [effectiveConfig.windCapacity, windCurveParams]);
 
+  // Theoretical PV panel-response curve for the current PV capacity — a
+  // pure function of irradiance, independent of time/weather. Sampled
+  // every 10 W/m² from 0 up to just past the saturation point so the
+  // chart traces the full linear ramp -> plateau shape cleanly.
+  const solarCurveData = useMemo(() => {
+    const capacity = effectiveConfig.pvCapacity;
+    const pts = [];
+    for (let irr = 0; irr <= 900; irr += 10) {
+      pts.push({ irradiance: irr, output: Math.round(pvOutputKw(irr, capacity) * 10) / 10 });
+    }
+    return pts;
+  }, [effectiveConfig.pvCapacity]);
+
   // Continuously-updated "where is live now" position, used to bound
   // accelerated playback when the full-year timeline isn't unlocked.
   const liveNowFloat = (() => {
@@ -931,6 +953,7 @@ export default function PolarTwinDashboard() {
   const snapshot = {
     temperature: interpAtHour(env.temperature, simIndexFloat, env.stepHours),
     windSpeed: interpAtHour(env.windSpeed, simIndexFloat, env.stepHours),
+    irradiance: interpAtHour(env.irradiance, simIndexFloat, env.stepHours),
     load: interpAtHour(env.totalLoad, simIndexFloat, env.stepHours),
     pv: interpAtHour(dispatch.pv, simIndexFloat, env.stepHours),
     wind: interpAtHour(dispatch.wind, simIndexFloat, env.stepHours),
@@ -964,6 +987,8 @@ export default function PolarTwinDashboard() {
       soc: Math.round(interpAtHour(dispatch.batterySoc, t, env.stepHours)),
       windSpeed: Math.round(interpAtHour(env.windSpeed, t, env.stepHours) * 10) / 10,
       windOutput: Math.round(interpAtHour(dispatch.wind, t, env.stepHours)),
+      irradiance: Math.round(interpAtHour(env.irradiance, t, env.stepHours)),
+      pvOutput: Math.round(interpAtHour(dispatch.pv, t, env.stepHours)),
     });
   }
   const tickInterval = Math.max(0, Math.floor(chartData.length / 7) - 1);
@@ -1083,6 +1108,36 @@ export default function PolarTwinDashboard() {
   const updateWindCurveParam = (field, value) => setWindCurveParams((p) => ({ ...p, [field]: value }));
   const resetWindCurveParam = (field) => setWindCurveParams((p) => ({ ...p, [field]: DEFAULT_WIND_CURVE_PARAMS[field] }));
 
+  // Single "reset everything" for the Parameters page — puts every
+  // editable field on that page (current station's base config, its
+  // effective PV/wind capacity override, the data seed, sample
+  // resolution, chart window, load split, dispatch/battery constants,
+  // and wind-curve breakpoints) back to its factory default in one go.
+  const resetAllParameters = () => {
+    setStationConfigs((prev) => ({
+      ...prev,
+      [station]: {
+        ...DEFAULT_STATIONS[station],
+        gustSpeedRange: [...DEFAULT_STATIONS[station].gustSpeedRange],
+        gustDurationHrRange: [...DEFAULT_STATIONS[station].gustDurationHrRange],
+        dieselGensetKw: [...DEFAULT_STATIONS[station].dieselGensetKw],
+      },
+    }));
+    setCapacities((c) => ({
+      ...c,
+      [station]: { pv: DEFAULT_STATIONS[station].pvCapacity, wind: DEFAULT_STATIONS[station].windCapacity },
+    }));
+    setSeeds(DEFAULT_SEEDS);
+    setStepMinutes(DEFAULT_STEP_MINUTES);
+    setCustomStepOn(false);
+    setCustomStepValue(1);
+    setCustomStepUnit("hours");
+    setHistoryWindowHours(DEFAULT_WINDOW_HOURS);
+    setLoadSplit({ ...DEFAULT_LOAD_SPLIT });
+    setDispatchParams({ ...DEFAULT_DISPATCH_PARAMS });
+    setWindCurveParams({ ...DEFAULT_WIND_CURVE_PARAMS });
+  };
+
   return (
     // position:fixed + inset:0 pins this layer to the full viewport
     // regardless of how the parent element sizes itself (a parent that
@@ -1146,12 +1201,13 @@ export default function PolarTwinDashboard() {
             config={effectiveConfig}
             stationName={config.name}
             snapshot={snapshot}
+            env={env}
+            dispatch={dispatch}
             windCurveData={windCurveData}
-            chartData={chartData}
-            historyWindowHours={historyWindowHours}
+            solarCurveData={solarCurveData}
             fmtWindowLabel={fmtWindowLabel}
             fmtAxisTick={fmtAxisTick}
-            tickInterval={tickInterval}
+            fmtIntervalLabel={fmtIntervalLabel}
             simIndexFloat={simIndexFloat}
           />
         )}
@@ -1212,6 +1268,7 @@ export default function PolarTwinDashboard() {
             defaultWindCurveParams={DEFAULT_WIND_CURVE_PARAMS}
             onWindCurveParamChange={updateWindCurveParam}
             onResetWindCurveParam={resetWindCurveParam}
+            onResetAll={resetAllParameters}
             constants={{
               TEMPLATE_YEAR, HOURS, GAMMA_1_5,
               MAX_CHART_POINTS, MIN_SAMPLE_SECONDS,
