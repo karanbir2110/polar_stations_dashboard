@@ -307,6 +307,24 @@ function SmallBtn({ onClick, active, children, title }) {
   );
 }
 
+// Big "reset everything on this page" button, styled to stand out from
+// the small per-field ResetLink icons so it reads as the page-level
+// action it is, not just another field control.
+function DefaultAllButton({ onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      title="Reset every editable value on this page — station config, capacities, seed, resolution, chart window, load split, dispatch constants, wind curve — back to factory defaults"
+      style={{
+        display: "flex", alignItems: "center", gap: 6, flexShrink: 0,
+        padding: "8px 14px", borderRadius: 8, cursor: "pointer",
+        fontSize: 12, fontWeight: 600, whiteSpace: "nowrap",
+        border: "1px solid #5EC8E8", background: "#132530", color: "#5EC8E8",
+      }}
+    >⟲ Default</button>
+  );
+}
+
 const round = (v, d = 1) => {
   const f = 10 ** d;
   return Math.round((v ?? 0) * f) / f;
@@ -327,6 +345,7 @@ export default function ParametersPage({
   loadSplit, defaultLoadSplit, onLoadSplitChange, onNormalizeLoadSplit, onResetLoadSplit,
   dispatchParams, defaultDispatchParams, onDispatchParamChange, onResetDispatchParam,
   windCurveParams, defaultWindCurveParams, onWindCurveParamChange, onResetWindCurveParam,
+  onResetAll,
   constants,
 }) {
   const {
@@ -350,12 +369,15 @@ export default function ParametersPage({
 
   return (
     <div>
-      <div style={{ color: "#8B9AA8", fontSize: 13, marginBottom: 16 }}>
-        Every parameter currently feeding the {stationName} Station simulation — site &amp; climate inputs,
-        power-system capacities, and the model constants behind dispatch and the charts — plus what the
-        simulation is doing with them right now. Values read live from app state; anything with a text
-        field below is editable (type a value, press Enter or click away) and feeds straight back into the
-        simulation. Each editable field lists the range it accepts.
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 16 }}>
+        <div style={{ color: "#8B9AA8", fontSize: 13 }}>
+          Every parameter currently feeding the {stationName} Station simulation — site &amp; climate inputs,
+          power-system capacities, and the model constants behind dispatch and the charts — plus what the
+          simulation is doing with them right now. Values read live from app state; anything with a text
+          field below is editable (type a value, press Enter or click away) and feeds straight back into the
+          simulation. Each editable field lists the range it accepts.
+        </div>
+        <DefaultAllButton onClick={onResetAll} />
       </div>
 
       {/* Live simulation context */}
