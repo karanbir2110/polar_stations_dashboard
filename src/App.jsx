@@ -4,11 +4,12 @@ import {
   ResponsiveContainer, CartesianGrid, ReferenceDot,
 } from "recharts";
 import RenewablesPage from "./RenewablesPage";
+import ParametersPage from "./ParametersPage";
 
 /* ============================================================
    STATION CONFIGS — mirrors the Python generator's parameters
    ============================================================ */
-const STATIONS = {
+const DEFAULT_STATIONS = {
   maitri: {
     name: "Maitri", latitudeDeg: -70.75,
     crewWinter: 25, crewSummer: 45,
@@ -31,15 +32,39 @@ const STATIONS = {
   },
 };
 
-const LOAD_SPLIT = {
+// These used to be fixed module-level constants. They're now DEFAULTS —
+// the actual values driving the simulation live in React state (below, in
+// the component) so they can be edited live from the Parameters page. The
+// DEFAULT_* names are kept around purely as factory-reset targets and as
+// default args for callers (tests, etc.) that don't pass explicit params.
+const DEFAULT_LOAD_SPLIT = {
   heating: 0.48, lifeSupport: 0.15, labColdStorage: 0.12,
   comms: 0.10, general: 0.15,
 };
-const DIESEL_KWH_PER_L = 3.17;
-const SOC_MIN = 0.20, SOC_MAX = 0.90, ROUND_TRIP_EFF = 0.92;
+const DEFAULT_DIESEL_KWH_PER_L = 3.17;
+const DEFAULT_SOC_MIN = 0.20, DEFAULT_SOC_MAX = 0.90, DEFAULT_ROUND_TRIP_EFF = 0.92;
 const TEMPLATE_YEAR = 2026;
 const HOURS = 8760;
 const GAMMA_1_5 = 0.8862269254527579;
+// Wind turbine power-curve breakpoints (m/s) — pulled out to module level
+// (instead of living only as windOutputKw's default args) so the Parameters
+// page can display the exact values actually driving the dispatch/curve math.
+const DEFAULT_WIND_CUT_IN_MS = 3.5;
+const DEFAULT_WIND_RATED_MS = 13.0;
+const DEFAULT_WIND_CUT_OUT_MS = 25.0;
+// Trailing window (days) used to smooth the fuel-runway estimate in runDispatch.
+const DEFAULT_RUNWAY_WINDOW_DAYS = 30;
+
+// Grouped defaults, handed to useState() initializers and used as
+// factory-reset targets from the Parameters page.
+const DEFAULT_DISPATCH_PARAMS = {
+  socMin: DEFAULT_SOC_MIN, socMax: DEFAULT_SOC_MAX,
+  roundTripEff: DEFAULT_ROUND_TRIP_EFF, dieselKwhPerL: DEFAULT_DIESEL_KWH_PER_L,
+  runwayWindowDays: DEFAULT_RUNWAY_WINDOW_DAYS,
+};
+const DEFAULT_WIND_CURVE_PARAMS = {
+  cutIn: DEFAULT_WIND_CUT_IN_MS, rated: DEFAULT_WIND_RATED_MS, cutOut: DEFAULT_WIND_CUT_OUT_MS,
+};
 
 // Default seeds — fixed on purpose so the dataset is IDENTICAL every time
 // this artifact loads or reloads, and reachable again any time via the
@@ -125,7 +150,7 @@ function mulberry32(seed) {
 /* ============================================================
    ENVIRONMENT GENERATION — unchanged logic from before
    ============================================================ */
-function generateEnvironment(config, seed, stepMinutes = DEFAULT_STEP_MINUTES) {
+function generateEnvironment(config, seed, stepMinutes = DEFAULT_STEP_MINUTES, loadSplit = DEFAULT_LOAD_SPLIT) {
   const stepHours = stepMinutes / 60;
   const n = Math.max(2, Math.round(HOURS / stepHours));
   const rng = mulberry32(seed);
@@ -216,21 +241,27 @@ function generateEnvironment(config, seed, stepMinutes = DEFAULT_STEP_MINUTES) {
     if (rng() < Math.min(1, 0.01 * stepHours)) load += 5 + rng() * 15;
     totalLoad[i] = Math.max(load, 20);
 
-    for (const key of Object.keys(LOAD_SPLIT)) {
-      loadBreakdown[key][i] = totalLoad[i] * LOAD_SPLIT[key];
+    for (const key of Object.keys(loadSplit)) {
+      loadBreakdown[key][i] = totalLoad[i] * loadSplit[key];
     }
   }
 
   return { temperature, windSpeed, weather, irradiance, totalLoad, loadBreakdown, stepHours, stepMinutes };
 }
 
-function windOutputKw(speed, capacityKw, cutIn = 3.5, rated = 13.0, cutOut = 25.0) {
+function windOutputKw(speed, capacityKw, cutIn = DEFAULT_WIND_CUT_IN_MS, rated = DEFAULT_WIND_RATED_MS, cutOut = DEFAULT_WIND_CUT_OUT_MS) {
   if (speed < cutIn || speed > cutOut) return 0;
   if (speed >= rated) return capacityKw;
   return capacityKw * Math.pow((speed - cutIn) / (rated - cutIn), 3);
 }
 
-function runDispatch(env, config, { windOn, solarOn }) {
+function runDispatch(env, config, { windOn, solarOn }, params = {}) {
+  const {
+    socMin = DEFAULT_SOC_MIN, socMax = DEFAULT_SOC_MAX,
+    roundTripEff = DEFAULT_ROUND_TRIP_EFF, dieselKwhPerL = DEFAULT_DIESEL_KWH_PER_L,
+    runwayWindowDays = DEFAULT_RUNWAY_WINDOW_DAYS,
+    windCutIn = DEFAULT_WIND_CUT_IN_MS, windRated = DEFAULT_WIND_RATED_MS, windCutOut = DEFAULT_WIND_CUT_OUT_MS,
+  } = params;
   // stepHours travels with `env` (set by generateEnvironment) so dispatch
   // always matches whatever resolution the environment was generated at.
   const stepHours = env.stepHours;
@@ -252,7 +283,7 @@ function runDispatch(env, config, { windOn, solarOn }) {
 
   for (let i = 0; i < n; i++) {
     pv[i] = solarOn ? Math.min(Math.max(env.irradiance[i] / 800, 0), 1) * config.pvCapacity : 0;
-    wind[i] = windOn ? windOutputKw(env.windSpeed[i], config.windCapacity) : 0;
+    wind[i] = windOn ? windOutputKw(env.windSpeed[i], config.windCapacity, windCutIn, windRated, windCutOut) : 0;
 
     const renewables = pv[i] + wind[i]; // kW — instantaneous/average power for this step
     const load = env.totalLoad[i];
@@ -262,15 +293,15 @@ function runDispatch(env, config, { windOn, solarOn }) {
 
     if (net >= 0) {
       // Energy (kWh) available to charge over this step's duration.
-      const roomKwh = Math.max((SOC_MAX - soc) * batteryCap, 0);
+      const roomKwh = Math.max((socMax - soc) * batteryCap, 0);
       const chargeKwh = Math.min(net * stepHours, roomKwh);
       batteryFlow[i] = -(chargeKwh / stepHours); // back to an average kW figure
       dieselOut[i] = 0;
-      socDeltaKwh = chargeKwh * ROUND_TRIP_EFF;
+      socDeltaKwh = chargeKwh * roundTripEff;
       notes[i] = `Renewables covering load with ${Math.round(net)} kW surplus — charging battery.`;
     } else {
       const deficitKwh = -net * stepHours;
-      const availableKwh = Math.max((soc - SOC_MIN) * batteryCap, 0);
+      const availableKwh = Math.max((soc - socMin) * batteryCap, 0);
       const fromBattKwh = Math.min(deficitKwh, availableKwh);
       batteryFlow[i] = fromBattKwh / stepHours;
       socDeltaKwh = -fromBattKwh;
@@ -293,14 +324,14 @@ function runDispatch(env, config, { windOn, solarOn }) {
     soc = Math.min(Math.max(soc + socDeltaKwh / batteryCap, 0), 1);
     batterySoc[i] = soc * 100;
 
-    fuelBurnL[i] = (dieselOut[i] * stepHours) / DIESEL_KWH_PER_L;
+    fuelBurnL[i] = (dieselOut[i] * stepHours) / dieselKwhPerL;
     tank -= fuelBurnL[i];
     tankLevelL[i] = tank;
   }
 
-  const windowHours = 24 * 30;
+  const windowHours = 24 * runwayWindowDays;
   const windowSteps = Math.max(1, Math.round(windowHours / stepHours));
-  const minRealisticBurnPerDay = (maxDieselKw * 0.02 * 24) / DIESEL_KWH_PER_L;
+  const minRealisticBurnPerDay = (maxDieselKw * 0.02 * 24) / dieselKwhPerL;
   const fuelRunwayDays = new Float64Array(n);
   let runningSum = 0;
   for (let i = 0; i < n; i++) {
@@ -564,7 +595,7 @@ function SmallButton({ onClick, active, disabled, title, children }) {
    MAIN DASHBOARD
    ============================================================ */
 export default function PolarTwinDashboard() {
-  const [page, setPage] = useState("dashboard"); // "dashboard" | "renewables"
+  const [page, setPage] = useState("dashboard"); // "dashboard" | "renewables" | "parameters"
   const [station, setStation] = useState("maitri");
   const [windOn, setWindOn] = useState(true);
   const [solarOn, setSolarOn] = useState(true);
@@ -584,9 +615,23 @@ export default function PolarTwinDashboard() {
   const [seeds, setSeeds] = useState(DEFAULT_SEEDS);
   const [seedInput, setSeedInput] = useState({ maitri: String(DEFAULT_SEEDS.maitri), bharati: String(DEFAULT_SEEDS.bharati) });
   const [capacities, setCapacities] = useState({
-    maitri: { pv: STATIONS.maitri.pvCapacity, wind: STATIONS.maitri.windCapacity },
-    bharati: { pv: STATIONS.bharati.pvCapacity, wind: STATIONS.bharati.windCapacity },
+    maitri: { pv: DEFAULT_STATIONS.maitri.pvCapacity, wind: DEFAULT_STATIONS.maitri.windCapacity },
+    bharati: { pv: DEFAULT_STATIONS.bharati.pvCapacity, wind: DEFAULT_STATIONS.bharati.windCapacity },
   });
+  // Editable site/climate + power-system BASE config, per station. Starts
+  // as a deep copy of DEFAULT_STATIONS so DEFAULT_STATIONS itself always
+  // stays intact as the factory-reset target (surfaced on the Parameters
+  // page). `capacities` above remains the separate "effective/installed"
+  // override layer for PV & wind (the existing slider), independent of
+  // whatever base capacity is set here.
+  const [stationConfigs, setStationConfigs] = useState(() => ({
+    maitri: { ...DEFAULT_STATIONS.maitri, gustSpeedRange: [...DEFAULT_STATIONS.maitri.gustSpeedRange], gustDurationHrRange: [...DEFAULT_STATIONS.maitri.gustDurationHrRange], dieselGensetKw: [...DEFAULT_STATIONS.maitri.dieselGensetKw] },
+    bharati: { ...DEFAULT_STATIONS.bharati, gustSpeedRange: [...DEFAULT_STATIONS.bharati.gustSpeedRange], gustDurationHrRange: [...DEFAULT_STATIONS.bharati.gustDurationHrRange], dieselGensetKw: [...DEFAULT_STATIONS.bharati.dieselGensetKw] },
+  }));
+  // Editable model constants (previously hardcoded module-level constants).
+  const [loadSplit, setLoadSplit] = useState({ ...DEFAULT_LOAD_SPLIT });
+  const [dispatchParams, setDispatchParams] = useState({ ...DEFAULT_DISPATCH_PARAMS });
+  const [windCurveParams, setWindCurveParams] = useState({ ...DEFAULT_WIND_CURVE_PARAMS });
   const [historyWindowHours, setHistoryWindowHours] = useState(DEFAULT_WINDOW_HOURS);
   const [customWindowValue, setCustomWindowValue] = useState(2);
   const [customWindowUnit, setCustomWindowUnit] = useState("days");
@@ -605,25 +650,32 @@ export default function PolarTwinDashboard() {
     ? clamp(customHoursPerSec, MIN_CUSTOM_HPS, MAX_CUSTOM_HPS)
     : SPEED_OPTIONS[speedIdx].hoursPerSec;
 
-  // Environment: regenerated when station, seed, OR data-resolution changes
-  // (expensive layer)
+  // Environment: regenerated when station, seed, data-resolution, base
+  // station config, OR the load-split shares change (expensive layer)
   const envByStation = useMemo(() => ({
-    maitri: generateEnvironment(STATIONS.maitri, seeds.maitri, stepMinutes),
-    bharati: generateEnvironment(STATIONS.bharati, seeds.bharati, stepMinutes),
-  }), [seeds, stepMinutes]);
+    maitri: generateEnvironment(stationConfigs.maitri, seeds.maitri, stepMinutes, loadSplit),
+    bharati: generateEnvironment(stationConfigs.bharati, seeds.bharati, stepMinutes, loadSplit),
+  }), [seeds, stepMinutes, stationConfigs, loadSplit]);
 
   const effectiveConfig = useMemo(() => ({
-    ...STATIONS[station],
+    ...stationConfigs[station],
     pvCapacity: capacities[station].pv,
     windCapacity: capacities[station].wind,
-  }), [station, capacities]);
+  }), [station, capacities, stationConfigs]);
 
-  // Dispatch: recomputed only when station/toggles/seed/capacity/resolution change (cheap layer)
+  // Bundled dispatch-model params so the memo below has one stable dep.
+  const dispatchModelParams = useMemo(() => ({
+    ...dispatchParams,
+    windCutIn: windCurveParams.cutIn, windRated: windCurveParams.rated, windCutOut: windCurveParams.cutOut,
+  }), [dispatchParams, windCurveParams]);
+
+  // Dispatch: recomputed only when station/toggles/seed/capacity/resolution/
+  // dispatch-constants change (cheap layer)
   const dispatch = useMemo(() => {
-    return runDispatch(envByStation[station], effectiveConfig, { windOn, solarOn });
-  }, [station, windOn, solarOn, envByStation, effectiveConfig]);
+    return runDispatch(envByStation[station], effectiveConfig, { windOn, solarOn }, dispatchModelParams);
+  }, [station, windOn, solarOn, envByStation, effectiveConfig, dispatchModelParams]);
 
-  const config = STATIONS[station];
+  const config = stationConfigs[station];
   const env = envByStation[station];
 
   // Theoretical turbine power curve for the current wind capacity — a pure
@@ -634,10 +686,10 @@ export default function PolarTwinDashboard() {
     const capacity = effectiveConfig.windCapacity;
     const pts = [];
     for (let s = 0; s <= 30; s += 0.2) {
-      pts.push({ speed: Math.round(s * 10) / 10, output: Math.round(windOutputKw(s, capacity) * 10) / 10 });
+      pts.push({ speed: Math.round(s * 10) / 10, output: Math.round(windOutputKw(s, capacity, windCurveParams.cutIn, windCurveParams.rated, windCurveParams.cutOut) * 10) / 10 });
     }
     return pts;
-  }, [effectiveConfig.windCapacity]);
+  }, [effectiveConfig.windCapacity, windCurveParams]);
 
   // Continuously-updated "where is live now" position, used to bound
   // accelerated playback when the full-year timeline isn't unlocked.
@@ -824,8 +876,8 @@ export default function PolarTwinDashboard() {
     setSeeds((prev) => (prev[key] === val ? prev : { ...prev, [key]: val }));
   };
 
-  const pvMax = Math.round(STATIONS[station].pvCapacity * 2);
-  const windMax = Math.round(STATIONS[station].windCapacity * 2);
+  const pvMax = Math.round(stationConfigs[station].pvCapacity * 2);
+  const windMax = Math.round(stationConfigs[station].windCapacity * 2);
 
   const isDefaultSeed = seeds.maitri === DEFAULT_SEEDS.maitri && seeds.bharati === DEFAULT_SEEDS.bharati;
 
@@ -848,6 +900,74 @@ export default function PolarTwinDashboard() {
     setCustomStepValue(1);
     setCustomStepUnit("hours");
   };
+
+  /* ----------------------------------------------------------------
+     Handlers for the newly-editable Parameters-page fields
+     ---------------------------------------------------------------- */
+  // Scalar base-config fields (latitude, crew, temps, wind avg, weibull k,
+  // gust probability, peak load, base PV/wind capacity, battery, tank).
+  const updateBaseField = (field, value) => {
+    setStationConfigs((prev) => ({ ...prev, [station]: { ...prev[station], [field]: value } }));
+  };
+  // Two-element array base-config fields (gustSpeedRange, gustDurationHrRange).
+  const updateBaseRangeField = (field, idx, value) => {
+    setStationConfigs((prev) => {
+      const arr = [...prev[station][field]];
+      arr[idx] = value;
+      return { ...prev, [station]: { ...prev[station], [field]: arr } };
+    });
+  };
+  // Variable-length diesel genset array (add/remove/edit).
+  const updateDieselGensets = (newArr) => {
+    setStationConfigs((prev) => ({ ...prev, [station]: { ...prev[station], dieselGensetKw: newArr } }));
+  };
+  const resetBaseField = (field) => {
+    setStationConfigs((prev) => ({
+      ...prev,
+      [station]: {
+        ...prev[station],
+        [field]: Array.isArray(DEFAULT_STATIONS[station][field])
+          ? [...DEFAULT_STATIONS[station][field]]
+          : DEFAULT_STATIONS[station][field],
+      },
+    }));
+  };
+
+  // Effective (installed/override) PV & wind capacity — same state the
+  // Dashboard's slider already writes to, just addressed by the base-config
+  // field name ("pvCapacity"/"windCapacity") for a uniform Parameters-page API.
+  const updateEffectiveCapacity = (field, value) => {
+    const key = field === "pvCapacity" ? "pv" : "wind";
+    setCapacities((c) => ({ ...c, [station]: { ...c[station], [key]: value } }));
+  };
+  const resetEffectiveCapacity = (field) => {
+    const key = field === "pvCapacity" ? "pv" : "wind";
+    setCapacities((c) => ({ ...c, [station]: { ...c[station], [key]: stationConfigs[station][field] } }));
+  };
+
+  // Load-split shares (must conceptually sum to 100% — normalize rescales
+  // them to do so without the user having to hand-balance every field).
+  const updateLoadSplit = (key, value) => {
+    setLoadSplit((prev) => ({ ...prev, [key]: value }));
+  };
+  const normalizeLoadSplit = () => {
+    setLoadSplit((prev) => {
+      const sum = Object.values(prev).reduce((a, b) => a + b, 0) || 1;
+      const next = {};
+      for (const k of Object.keys(prev)) next[k] = prev[k] / sum;
+      return next;
+    });
+  };
+  const resetLoadSplit = () => setLoadSplit({ ...DEFAULT_LOAD_SPLIT });
+
+  // Dispatch & battery model constants (SOC floor/ceiling, round-trip
+  // efficiency, diesel efficiency, runway averaging window).
+  const updateDispatchParam = (field, value) => setDispatchParams((p) => ({ ...p, [field]: value }));
+  const resetDispatchParam = (field) => setDispatchParams((p) => ({ ...p, [field]: DEFAULT_DISPATCH_PARAMS[field] }));
+
+  // Wind turbine power-curve breakpoints.
+  const updateWindCurveParam = (field, value) => setWindCurveParams((p) => ({ ...p, [field]: value }));
+  const resetWindCurveParam = (field) => setWindCurveParams((p) => ({ ...p, [field]: DEFAULT_WIND_CURVE_PARAMS[field] }));
 
   return (
     // position:fixed + inset:0 pins this layer to the full viewport
@@ -874,14 +994,14 @@ export default function PolarTwinDashboard() {
             <div style={{ color: "#8B9AA8", fontSize: 13, marginTop: 2 }}>Live energy monitor — {config.name} Station</div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            {Object.keys(STATIONS).map((key) => (
+            {Object.keys(stationConfigs).map((key) => (
               <button key={key} onClick={() => setStation(key)} style={{
                 padding: "8px 18px", borderRadius: 8, cursor: "pointer",
                 border: `1px solid ${station === key ? "#5EC8E8" : "#1F2A35"}`,
                 background: station === key ? "#132530" : "#10151C",
                 color: station === key ? "#5EC8E8" : "#8B9AA8",
                 fontWeight: 600, fontSize: 13,
-              }}>{STATIONS[key].name}</button>
+              }}>{stationConfigs[key].name}</button>
             ))}
             <button onClick={useDefaultSeed} disabled={isDefaultSeed} title="Restores the original 42/43 seed pair the dashboard starts with"
               style={{
@@ -904,6 +1024,7 @@ export default function PolarTwinDashboard() {
         <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
           <ModeButton active={page === "dashboard"} onClick={() => setPage("dashboard")}>Dashboard</ModeButton>
           <ModeButton active={page === "renewables"} onClick={() => setPage("renewables")}>🌬 Renewable Resources</ModeButton>
+          <ModeButton active={page === "parameters"} onClick={() => setPage("parameters")}>⚙ Parameters</ModeButton>
         </div>
 
         {page === "renewables" && (
@@ -921,6 +1042,71 @@ export default function PolarTwinDashboard() {
           />
         )}
 
+        {page === "parameters" && (
+          <ParametersPage
+            stationKey={station}
+            stationName={config.name}
+            stationOptions={Object.keys(stationConfigs).map((key) => ({ key, name: stationConfigs[key].name }))}
+            onStationChange={setStation}
+            baseConfig={stationConfigs[station]}
+            defaultBaseConfig={DEFAULT_STATIONS[station]}
+            onBaseFieldChange={updateBaseField}
+            onBaseRangeFieldChange={updateBaseRangeField}
+            onDieselGensetsChange={updateDieselGensets}
+            onResetBaseField={resetBaseField}
+            effectiveConfig={effectiveConfig}
+            onEffectiveCapacityChange={updateEffectiveCapacity}
+            onResetEffectiveCapacity={resetEffectiveCapacity}
+            seed={seeds[station]}
+            isDefaultSeed={isDefaultSeed}
+            onSeedChange={(v) => setSeeds((s) => ({ ...s, [station]: v }))}
+            onUseDefaultSeed={useDefaultSeed}
+            onRegenerateSeed={regenerate}
+            stepMinutesSetting={stepMinutes}
+            stepHoursActive={env.stepHours}
+            samplesPerYear={env.temperature.length}
+            isDefaultStep={isDefaultStep}
+            onStepMinutesChange={(v) => setStepMinutes(clamp(Math.round(v), MIN_STEP_MINUTES, MAX_STEP_MINUTES))}
+            onUseDefaultStep={useDefaultStep}
+            historyWindowHours={historyWindowHours}
+            onHistoryWindowHoursChange={(v) => setHistoryWindowHours(clamp(v, MIN_WINDOW_HOURS, MAX_WINDOW_HOURS))}
+            onResetHistoryWindowHours={resetZoom}
+            mode={mode}
+            onModeChange={setMode}
+            hoursPerSec={hoursPerSec}
+            onHoursPerSecChange={(v) => { setCustomSpeedOn(true); setCustomHoursPerSec(clamp(v, MIN_CUSTOM_HPS, MAX_CUSTOM_HPS)); }}
+            windOn={windOn}
+            onWindOnChange={setWindOn}
+            solarOn={solarOn}
+            onSolarOnChange={setSolarOn}
+            simIndexFloat={simIndexFloat}
+            simTimeLabel={fmtSeasonPrecise(simIndexFloat)}
+            snapshot={snapshot}
+            chartPointCount={chartData.length}
+            sampleIntervalSec={sampleIntervalSec}
+            tickInterval={tickInterval}
+            loadSplit={loadSplit}
+            defaultLoadSplit={DEFAULT_LOAD_SPLIT}
+            onLoadSplitChange={updateLoadSplit}
+            onNormalizeLoadSplit={normalizeLoadSplit}
+            onResetLoadSplit={resetLoadSplit}
+            dispatchParams={dispatchParams}
+            defaultDispatchParams={DEFAULT_DISPATCH_PARAMS}
+            onDispatchParamChange={updateDispatchParam}
+            onResetDispatchParam={resetDispatchParam}
+            windCurveParams={windCurveParams}
+            defaultWindCurveParams={DEFAULT_WIND_CURVE_PARAMS}
+            onWindCurveParamChange={updateWindCurveParam}
+            onResetWindCurveParam={resetWindCurveParam}
+            constants={{
+              TEMPLATE_YEAR, HOURS, GAMMA_1_5,
+              MAX_CHART_POINTS, MIN_SAMPLE_SECONDS,
+              DEFAULT_WINDOW_HOURS, DEFAULT_STEP_MINUTES, DEFAULT_SEEDS,
+              MIN_STEP_MINUTES, MAX_STEP_MINUTES, MIN_WINDOW_HOURS, MAX_WINDOW_HOURS,
+            }}
+          />
+        )}
+
         {page === "dashboard" && (<>
         {/* Seed panel */}
         <div style={{
@@ -931,9 +1117,9 @@ export default function PolarTwinDashboard() {
             "Default seed" restores the original 42/43 dataset. "Regenerate" always picks a new
             random seed. Or type a specific seed below — the same seed always reproduces identical data.
           </div>
-          {Object.keys(STATIONS).map((key) => (
+          {Object.keys(stationConfigs).map((key) => (
             <div key={key} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ fontSize: 11, color: "#8B9AA8" }}>{STATIONS[key].name} seed</span>
+              <span style={{ fontSize: 11, color: "#8B9AA8" }}>{stationConfigs[key].name} seed</span>
               <input
                 type="number" value={seedInput[key]}
                 onChange={(e) => setSeedInput((s) => ({ ...s, [key]: e.target.value }))}
@@ -1000,13 +1186,13 @@ export default function PolarTwinDashboard() {
             label="Solar PV" on={solarOn} onToggle={setSolarOn}
             valueKw={capacities[station].pv}
             onValueChange={(v) => setCapacities((c) => ({ ...c, [station]: { ...c[station], pv: v } }))}
-            maxKw={pvMax} defaultKw={STATIONS[station].pvCapacity}
+            maxKw={pvMax} defaultKw={stationConfigs[station].pvCapacity}
           />
           <RenewableControl
             label="Wind Turbines" on={windOn} onToggle={setWindOn}
             valueKw={capacities[station].wind}
             onValueChange={(v) => setCapacities((c) => ({ ...c, [station]: { ...c[station], wind: v } }))}
-            maxKw={windMax} defaultKw={STATIONS[station].windCapacity}
+            maxKw={windMax} defaultKw={stationConfigs[station].windCapacity}
           />
         </div>
 
