@@ -298,6 +298,57 @@ const round = (v, d = 1) => {
 };
 const pct = (v) => `${Math.round(v * 100)}`;
 
+// --- CSV export -------------------------------------------------------
+// Turns a single cell into a safe CSV field: wraps in quotes and escapes
+// embedded quotes whenever the value contains a comma, quote, or newline.
+function csvCell(value) {
+  const s = value === null || value === undefined ? "" : String(value);
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function rowsToCsv(rows) {
+  return rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
+}
+
+function downloadCsv(filename, rows) {
+  const csv = rowsToCsv(rows);
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+// Formats a simulated hour-offset as "YYYY-MM-DD HH:MM:SS" (UTC), matching
+// the same Date.UTC(templateYear, 0, 1) + hours*3600000 anchor used by
+// generateEnvironment() so timestamps line up exactly with the training data.
+function fmtCsvTimestamp(templateYear, elapsedHours) {
+  const d = new Date(Date.UTC(templateYear, 0, 1) + elapsedHours * 3600000);
+  return d.toISOString().slice(0, 19).replace("T", " ");
+}
+
+// Small "Export CSV" button, styled to sit alongside DefaultAllButton at
+// the top of the page.
+function ExportCsvButton({ onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      title="Export the full year of simulated 5-minute data (temperature, wind, solar, dispatch, battery, fuel — same columns as the training dataset) as a CSV file"
+      style={{
+        display: "flex", alignItems: "center", gap: 6, flexShrink: 0,
+        padding: "8px 14px", borderRadius: 8, cursor: "pointer",
+        fontSize: 12, fontWeight: 600, whiteSpace: "nowrap",
+        border: "1px solid #4FD1A5", background: "#12241C", color: "#4FD1A5",
+      }}
+    >⬇ Export Dataset CSV</button>
+  );
+}
+
 export default function ParametersPage({
   stationKey, stationName, stationOptions, onStationChange,
   baseConfig, defaultBaseConfig, onBaseFieldChange, onBaseRangeFieldChange, onDieselGensetsChange, onResetBaseField,
@@ -313,6 +364,7 @@ export default function ParametersPage({
   dispatchParams, defaultDispatchParams, onDispatchParamChange, onResetDispatchParam,
   windCurveParams, defaultWindCurveParams, onWindCurveParamChange, onResetWindCurveParam,
   onResetAll,
+  fineEnv, fineDispatch,
   constants,
 }) {
   const {
@@ -340,6 +392,64 @@ export default function ParametersPage({
   const runwayRaw = snapshot.runwayRaw;
   const runwayIsFloored = Number.isFinite(runwayRaw) && runwayRaw > runwayFloored * 1.05;
 
+  // Builds one row per underlying physics sample (fineEnv/fineDispatch run
+  // at the fixed SIM_STEP_MINUTES resolution, for the full simulated year)
+  // with the exact same columns as the maitri_2026_synthetic.csv training
+  // dataset: timestamp, station, weather/environment inputs, dispatch
+  // outputs, battery state, and fuel — so this export can be used directly
+  // as training data and reflects whatever seed/config is active right now.
+  const DATASET_CSV_HEADER = [
+    "timestamp", "station", "temperature_c", "wind_speed_ms", "weather",
+    "solar_irradiance_wm2", "pv_output_kw", "wind_output_kw", "total_load_kw",
+    "load_heating_hvac_kw", "load_life_support_water_waste_kw", "load_lab_cold_storage_kw",
+    "load_comms_instruments_kw", "load_general_lighting_kw",
+    "diesel_output_kw", "battery_soc_pct", "battery_flow_kw", "unmet_load_kw",
+    "diesel_fuel_burn_l", "diesel_tank_level_l", "fuel_runway_days", "dispatch_note",
+  ];
+
+  const buildDatasetCsvRows = () => {
+    const rows = [DATASET_CSV_HEADER];
+    if (!fineEnv || !fineDispatch) return rows;
+
+    const { temperature, windSpeed, weather, irradiance, totalLoad, loadBreakdown, stepHours } = fineEnv;
+    const { pv, wind, dieselOut, batterySoc, batteryFlow, unmet, fuelBurnL, tankLevelL, fuelRunwayDays, notes } = fineDispatch;
+    const n = temperature.length;
+
+    for (let i = 0; i < n; i++) {
+      const runway = fuelRunwayDays[i];
+      rows.push([
+        fmtCsvTimestamp(TEMPLATE_YEAR, i * stepHours),
+        stationName,
+        temperature[i],
+        windSpeed[i],
+        weather[i],
+        irradiance[i],
+        pv[i],
+        wind[i],
+        totalLoad[i],
+        loadBreakdown.heating[i],
+        loadBreakdown.lifeSupport[i],
+        loadBreakdown.labColdStorage[i],
+        loadBreakdown.comms[i],
+        loadBreakdown.general[i],
+        dieselOut[i],
+        batterySoc[i],
+        batteryFlow[i],
+        unmet[i],
+        fuelBurnL[i],
+        tankLevelL[i],
+        Number.isFinite(runway) ? runway : "inf",
+        notes[i],
+      ]);
+    }
+    return rows;
+  };
+
+  const handleExportCsv = () => {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    downloadCsv(`${stationKey}-dataset-seed${seed}-${stamp}.csv`, buildDatasetCsvRows());
+  };
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 16 }}>
@@ -350,7 +460,10 @@ export default function ParametersPage({
           field below is editable (type a value, press Enter or click away) and feeds straight back into the
           simulation. Each editable field lists the range it accepts.
         </div>
-        <DefaultAllButton onClick={onResetAll} />
+        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+          <ExportCsvButton onClick={handleExportCsv} />
+          <DefaultAllButton onClick={onResetAll} />
+        </div>
       </div>
 
       {/* Live simulation context */}

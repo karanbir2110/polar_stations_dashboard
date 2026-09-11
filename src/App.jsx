@@ -1269,6 +1269,8 @@ export default function PolarTwinDashboard() {
             onWindCurveParamChange={updateWindCurveParam}
             onResetWindCurveParam={resetWindCurveParam}
             onResetAll={resetAllParameters}
+            fineEnv={fineEnvByStation[station]}
+            fineDispatch={fineDispatch}
             constants={{
               TEMPLATE_YEAR, HOURS, GAMMA_1_5,
               MAX_CHART_POINTS, MIN_SAMPLE_SECONDS,
