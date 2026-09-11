@@ -33,8 +33,19 @@ function Panel({ title, flex, minWidth, children }) {
 export default function RenewablesPage({
   config, stationName, snapshot, windCurveData, chartData,
   historyWindowHours, fmtWindowLabel, fmtAxisTick, tickInterval, simIndexFloat,
+  windCurveParams,
 }) {
   const capacityFactorPct = config.windCapacity > 0 ? (snapshot.wind / config.windCapacity) * 100 : 0;
+
+  // Fall back to the historical defaults if the prop isn't supplied (e.g.
+  // a test harness mounting this page standalone).
+  const cutIn  = windCurveParams?.cutIn  ?? 3.5;
+  const rated  = windCurveParams?.rated  ?? 13.0;
+  const cutOut = windCurveParams?.cutOut ?? 25.0;
+
+  // S-curve X-axis: keep a sensible minimum span (30 m/s) but extend past
+  // whatever cut-out the user has set, so the whole curve stays visible.
+  const xMax = Math.max(30, Math.ceil(cutOut + 5));
 
   return (
     <div>
@@ -56,7 +67,7 @@ export default function RenewablesPage({
           <ResponsiveContainer width="100%" height={300}>
             <LineChart data={windCurveData}>
               <CartesianGrid stroke="#1F2A35" vertical={false} />
-              <XAxis dataKey="speed" type="number" domain={[0, 30]}
+              <XAxis dataKey="speed" type="number" domain={[0, xMax]}
                 tick={{ fill: "#8B9AA8", fontSize: 10 }} axisLine={{ stroke: "#1F2A35" }} tickLine={false}
                 label={{ value: "wind speed (m/s)", position: "insideBottom", offset: -4, fill: "#4A5560", fontSize: 10 }} />
               <YAxis tick={{ fill: "#8B9AA8", fontSize: 10 }} axisLine={false} tickLine={false}
@@ -64,10 +75,10 @@ export default function RenewablesPage({
               <Tooltip contentStyle={{ background: "#0A0E14", border: "1px solid #1F2A35", fontSize: 12 }}
                 formatter={(v, name) => [`${v} kW`, name]} labelFormatter={(v) => `${v} m/s`} />
               <Line type="monotone" dataKey="output" stroke="#5EC8E8" strokeWidth={2} dot={false} name="Output (kW)" isAnimationActive={false} />
-              <ReferenceLine x={3.5} stroke="#8B9AA8" strokeDasharray="3 3" label={{ value: "cut-in", fill: "#8B9AA8", fontSize: 10, position: "top" }} />
-              <ReferenceLine x={13.0} stroke="#4FD1A5" strokeDasharray="3 3" label={{ value: "rated", fill: "#4FD1A5", fontSize: 10, position: "top" }} />
-              <ReferenceLine x={25.0} stroke="#E8A23D" strokeDasharray="3 3" label={{ value: "cut-out", fill: "#E8A23D", fontSize: 10, position: "top" }} />
-              <ReferenceDot x={Math.min(snapshot.windSpeed, 30)} y={snapshot.wind} r={5} fill="#4FD1A5" stroke="#0A0E14" isAnimationActive={false} />
+              <ReferenceLine x={cutIn}  stroke="#8B9AA8" strokeDasharray="3 3" label={{ value: "cut-in",  fill: "#8B9AA8", fontSize: 10, position: "top" }} />
+              <ReferenceLine x={rated}  stroke="#4FD1A5" strokeDasharray="3 3" label={{ value: "rated",   fill: "#4FD1A5", fontSize: 10, position: "top" }} />
+              <ReferenceLine x={cutOut} stroke="#E8A23D" strokeDasharray="3 3" label={{ value: "cut-out", fill: "#E8A23D", fontSize: 10, position: "top" }} />
+              <ReferenceDot x={Math.min(snapshot.windSpeed, xMax)} y={snapshot.wind} r={5} fill="#4FD1A5" stroke="#0A0E14" isAnimationActive={false} />
             </LineChart>
           </ResponsiveContainer>
         </Panel>
@@ -84,7 +95,7 @@ export default function RenewablesPage({
               <YAxis tick={{ fill: "#8B9AA8", fontSize: 10 }} axisLine={false} tickLine={false} />
               <Tooltip labelFormatter={(v) => fmtAxisTick(v, historyWindowHours)} contentStyle={{ background: "#0A0E14", border: "1px solid #1F2A35", fontSize: 12 }} />
               <Area type="monotone" dataKey="windSpeed" stroke="#5EC8E8" fill="#5EC8E8" fillOpacity={0.25} name="Wind speed (m/s)" isAnimationActive={false} />
-              <ReferenceLine y={25.0} stroke="#E8A23D" strokeDasharray="3 3" label={{ value: "cut-out", fill: "#E8A23D", fontSize: 9, position: "right" }} />
+              <ReferenceLine y={cutOut} stroke="#E8A23D" strokeDasharray="3 3" label={{ value: "cut-out", fill: "#E8A23D", fontSize: 9, position: "right" }} />
               <ReferenceLine x={simIndexFloat} stroke="#5EC8E8" strokeDasharray="3 3" />
             </AreaChart>
           </ResponsiveContainer>

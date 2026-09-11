@@ -134,6 +134,15 @@ const STEP_PRESETS = [
 ];
 const STEP_UNIT_MINUTES = { minutes: 1, hours: 60, days: 1440, weeks: 10080 };
 
+// The environment + dispatch physics ALWAYS run at this fixed internal
+// resolution, regardless of what output resolution the user selects. The
+// user's resolution setting only controls how the fine results are
+// aggregated/sampled for display. This is what makes fuel burn, tank level
+// and fuel runway consistent across every resolution setting (previously a
+// coarse step would spuriously zero out irradiance and starve the battery,
+// causing wildly different runway figures).
+const SIM_STEP_MINUTES = 5;
+
 /* ============================================================
    SEEDED PRNG
    ============================================================ */
@@ -344,6 +353,96 @@ function runDispatch(env, config, { windOn, solarOn }, params = {}) {
   }
 
   return { pv, wind, dieselOut, batterySoc, batteryFlow, unmet, fuelBurnL, tankLevelL, fuelRunwayDays, notes, stepHours };
+}
+
+/* ============================================================
+   RESOLUTION AGGREGATION
+   The physics always runs at SIM_STEP_MINUTES. These helpers fold the fine
+   simulation arrays up to whatever output resolution the user picked, so
+   the resolution selector changes how many points are shown, not what the
+   results actually say.
+   ============================================================ */
+function aggregateFloat(fineArr, fineStepHours, targetStepHours, mode = "avg") {
+  if (targetStepHours <= fineStepHours) return fineArr;
+  const n = fineArr.length;
+  const totalHours = n * fineStepHours;
+  const outN = Math.max(1, Math.round(totalHours / targetStepHours));
+  const stepRatio = targetStepHours / fineStepHours;
+  const out = new Float64Array(outN);
+  for (let j = 0; j < outN; j++) {
+    const lo = Math.min(Math.round(j * stepRatio), n - 1);
+    const hi = Math.min(Math.round((j + 1) * stepRatio), n);
+    if (hi <= lo) { out[j] = j > 0 ? out[j - 1] : fineArr[n - 1]; continue; }
+    if (mode === "last") {
+      out[j] = fineArr[hi - 1];
+    } else if (mode === "sum") {
+      let s = 0;
+      for (let k = lo; k < hi; k++) s += fineArr[k];
+      out[j] = s;
+    } else {
+      let s = 0;
+      for (let k = lo; k < hi; k++) s += fineArr[k];
+      out[j] = s / (hi - lo);
+    }
+  }
+  return out;
+}
+
+function aggregateLabel(fineArr, fineStepHours, targetStepHours, mode = "last") {
+  if (targetStepHours <= fineStepHours) return fineArr;
+  const n = fineArr.length;
+  const totalHours = n * fineStepHours;
+  const outN = Math.max(1, Math.round(totalHours / targetStepHours));
+  const stepRatio = targetStepHours / fineStepHours;
+  const out = new Array(outN);
+  for (let j = 0; j < outN; j++) {
+    const lo = Math.min(Math.round(j * stepRatio), n - 1);
+    const hi = Math.min(Math.round((j + 1) * stepRatio), n);
+    if (hi <= lo) { out[j] = j > 0 ? out[j - 1] : fineArr[n - 1]; continue; }
+    out[j] = mode === "first" ? fineArr[lo] : fineArr[hi - 1];
+  }
+  return out;
+}
+
+function aggregateEnvironment(fineEnv, targetStepMinutes) {
+  const targetStepHours = targetStepMinutes / 60;
+  if (targetStepHours <= fineEnv.stepHours) return fineEnv;
+  const fs = fineEnv.stepHours, ts = targetStepHours;
+  return {
+    temperature: aggregateFloat(fineEnv.temperature, fs, ts),
+    windSpeed:   aggregateFloat(fineEnv.windSpeed,   fs, ts),
+    weather:     aggregateLabel(fineEnv.weather,     fs, ts),
+    irradiance:  aggregateFloat(fineEnv.irradiance,  fs, ts),
+    totalLoad:   aggregateFloat(fineEnv.totalLoad,   fs, ts),
+    loadBreakdown: {
+      heating:        aggregateFloat(fineEnv.loadBreakdown.heating,        fs, ts),
+      lifeSupport:    aggregateFloat(fineEnv.loadBreakdown.lifeSupport,    fs, ts),
+      labColdStorage: aggregateFloat(fineEnv.loadBreakdown.labColdStorage, fs, ts),
+      comms:          aggregateFloat(fineEnv.loadBreakdown.comms,          fs, ts),
+      general:        aggregateFloat(fineEnv.loadBreakdown.general,        fs, ts),
+    },
+    stepHours: targetStepHours,
+    stepMinutes: targetStepMinutes,
+  };
+}
+
+function aggregateDispatch(fineDispatch, targetStepMinutes) {
+  const targetStepHours = targetStepMinutes / 60;
+  if (targetStepHours <= fineDispatch.stepHours) return fineDispatch;
+  const fs = fineDispatch.stepHours, ts = targetStepHours;
+  return {
+    pv:             aggregateFloat(fineDispatch.pv,             fs, ts),
+    wind:           aggregateFloat(fineDispatch.wind,           fs, ts),
+    dieselOut:      aggregateFloat(fineDispatch.dieselOut,      fs, ts),
+    batterySoc:     aggregateFloat(fineDispatch.batterySoc,     fs, ts, "last"),
+    batteryFlow:    aggregateFloat(fineDispatch.batteryFlow,    fs, ts),
+    unmet:          aggregateFloat(fineDispatch.unmet,          fs, ts),
+    fuelBurnL:      aggregateFloat(fineDispatch.fuelBurnL,      fs, ts, "sum"),
+    tankLevelL:     aggregateFloat(fineDispatch.tankLevelL,     fs, ts, "last"),
+    fuelRunwayDays: aggregateFloat(fineDispatch.fuelRunwayDays, fs, ts, "last"),
+    notes:          aggregateLabel(fineDispatch.notes,          fs, ts),
+    stepHours:      ts,
+  };
 }
 
 // Maps a real wall-clock Date onto the templated simulation year, at
@@ -635,8 +734,9 @@ export default function PolarTwinDashboard() {
   const [historyWindowHours, setHistoryWindowHours] = useState(DEFAULT_WINDOW_HOURS);
   const [customWindowValue, setCustomWindowValue] = useState(2);
   const [customWindowUnit, setCustomWindowUnit] = useState("days");
-  // Data-generation resolution (how often the simulation actually samples
-  // the environment/dispatch), independent of the chart zoom window above.
+  // Data-generation resolution (how often the simulation's results are
+  // sampled for display). The physics always runs at SIM_STEP_MINUTES
+  // internally; this only controls the aggregation/sampling layer.
   const [stepMinutes, setStepMinutes] = useState(DEFAULT_STEP_MINUTES);
   const [customStepOn, setCustomStepOn] = useState(false);
   const [customStepValue, setCustomStepValue] = useState(1);
@@ -650,12 +750,20 @@ export default function PolarTwinDashboard() {
     ? clamp(customHoursPerSec, MIN_CUSTOM_HPS, MAX_CUSTOM_HPS)
     : SPEED_OPTIONS[speedIdx].hoursPerSec;
 
-  // Environment: regenerated when station, seed, data-resolution, base
-  // station config, OR the load-split shares change (expensive layer)
+  // ---- Fine physics layer: ALWAYS runs at SIM_STEP_MINUTES. -----------------
+  // Regenerated when station, seed, base station config, or the load-split
+  // shares change (expensive layer).
+  const fineEnvByStation = useMemo(() => ({
+    maitri:  generateEnvironment(stationConfigs.maitri,  seeds.maitri,  SIM_STEP_MINUTES, loadSplit),
+    bharati: generateEnvironment(stationConfigs.bharati, seeds.bharati, SIM_STEP_MINUTES, loadSplit),
+  }), [seeds, stationConfigs, loadSplit]);
+
+  // Display layer: same physics, just aggregated up to the user's output
+  // resolution. This is what feeds all charts / readouts below.
   const envByStation = useMemo(() => ({
-    maitri: generateEnvironment(stationConfigs.maitri, seeds.maitri, stepMinutes, loadSplit),
-    bharati: generateEnvironment(stationConfigs.bharati, seeds.bharati, stepMinutes, loadSplit),
-  }), [seeds, stepMinutes, stationConfigs, loadSplit]);
+    maitri:  aggregateEnvironment(fineEnvByStation.maitri,  stepMinutes),
+    bharati: aggregateEnvironment(fineEnvByStation.bharati, stepMinutes),
+  }), [fineEnvByStation, stepMinutes]);
 
   const effectiveConfig = useMemo(() => ({
     ...stationConfigs[station],
@@ -669,11 +777,17 @@ export default function PolarTwinDashboard() {
     windCutIn: windCurveParams.cutIn, windRated: windCurveParams.rated, windCutOut: windCurveParams.cutOut,
   }), [dispatchParams, windCurveParams]);
 
-  // Dispatch: recomputed only when station/toggles/seed/capacity/resolution/
-  // dispatch-constants change (cheap layer)
+  // ---- Fine dispatch: runs on the fine environment --------------------------
+  // This is what makes fuel burn / tank level / fuel runway consistent
+  // across every output-resolution setting.
+  const fineDispatch = useMemo(() => {
+    return runDispatch(fineEnvByStation[station], effectiveConfig, { windOn, solarOn }, dispatchModelParams);
+  }, [station, windOn, solarOn, fineEnvByStation, effectiveConfig, dispatchModelParams]);
+
+  // Display dispatch: aggregated to the user's chosen output resolution.
   const dispatch = useMemo(() => {
-    return runDispatch(envByStation[station], effectiveConfig, { windOn, solarOn }, dispatchModelParams);
-  }, [station, windOn, solarOn, envByStation, effectiveConfig, dispatchModelParams]);
+    return aggregateDispatch(fineDispatch, stepMinutes);
+  }, [fineDispatch, stepMinutes]);
 
   const config = stationConfigs[station];
   const env = envByStation[station];
@@ -1103,6 +1217,7 @@ export default function PolarTwinDashboard() {
               MAX_CHART_POINTS, MIN_SAMPLE_SECONDS,
               DEFAULT_WINDOW_HOURS, DEFAULT_STEP_MINUTES, DEFAULT_SEEDS,
               MIN_STEP_MINUTES, MAX_STEP_MINUTES, MIN_WINDOW_HOURS, MAX_WINDOW_HOURS,
+              SIM_STEP_MINUTES,
             }}
           />
         )}
@@ -1141,9 +1256,11 @@ export default function PolarTwinDashboard() {
           background: "#10151C", border: "1px solid #1F2A35", borderRadius: 10, padding: "10px 14px",
         }}>
           <div style={{ fontSize: 11, color: "#8B9AA8", minWidth: 210 }}>
-            Data resolution — how often the simulation samples weather, load and dispatch
-            across the year. Finer resolution captures more detail but generates more points;
-            this is separate from the chart zoom window above.
+            Data resolution — how finely the simulation's results are sampled across the year.
+            The underlying physics (weather, load, dispatch) always runs at a fixed 5-minute
+            step internally, so changing this only changes how many points are reported and
+            plotted — it does not change the results (fuel burn, tank level or fuel runway).
+            Separate from the chart zoom window above.
           </div>
           {!customStepOn && (
             <select value={stepMinutes} onChange={(e) => setStepMinutes(Number(e.target.value))}
@@ -1173,11 +1290,13 @@ export default function PolarTwinDashboard() {
               <SmallButton onClick={applyCustomStep}>Apply</SmallButton>
             </div>
           )}
-          <SmallButton onClick={useDefaultStep} active={isDefaultStep} title="Restores the original 1 sample/hour resolution">
+          <SmallButton onClick={useDefaultStep} active={isDefaultStep} title="Restores the original 1 sample/hour display resolution">
             ⟲ Set to default
           </SmallButton>
           <span style={{ marginLeft: "auto", fontSize: 11, color: "#4A5560", fontFamily: "ui-monospace, monospace" }}>
-            active: {fmtWindowLabel(env.stepHours)}/sample · {env.temperature.length.toLocaleString()} samples/year
+            display: {fmtWindowLabel(env.stepHours)}/sample · {env.temperature.length.toLocaleString()} samples/year
+            {" · "}
+            physics: {SIM_STEP_MINUTES}min ({fineEnvByStation[station].temperature.length.toLocaleString()} steps)
           </span>
         </div>
 
@@ -1407,8 +1526,9 @@ export default function PolarTwinDashboard() {
         <div style={{ marginTop: 20, color: "#4A5560", fontSize: 11 }}>
           Synthetic data — physics-informed generator calibrated to researched station parameters, not historical sensor logs.
           Dataset is seeded and identical for a given seed; use "Default seed" to return to the original dataset,
-          "Regenerate" for a new random seed, or enter your own seed above. Data resolution controls how often that
-          dataset is actually sampled across the year (default: hourly) — use "Set to default" to return to that.
+          "Regenerate" for a new random seed, or enter your own seed above. The physics always runs at a fixed
+          5-minute internal step; the Data resolution control only changes how many points are reported and plotted,
+          so fuel burn, tank level and fuel runway stay identical across resolution settings.
         </div>
         </>)}
       </div>

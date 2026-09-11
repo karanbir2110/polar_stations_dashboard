@@ -33,10 +33,6 @@ function Row({ label, value, unit, note, highlight }) {
   );
 }
 
-// Small reset-to-default icon button, only rendered when the current value
-// has actually drifted from its default (so it doesn't clutter untouched
-// rows). Styled like the rest of the app's small pill/icon controls rather
-// than a bare underlined text link.
 function ResetLink({ show, onClick, label }) {
   if (!show) return null;
   return (
@@ -53,19 +49,6 @@ function ResetLink({ show, onClick, label }) {
   );
 }
 
-/* ============================================================
-   NUMBER-FIELD PLUMBING
-   ------------------------------------------------------------
-   Every editable number on this page is now a plain text field
-   (type="text" + inputMode="decimal") instead of a spinner-style
-   number input, so the value can be typed straight in. Each field
-   advertises its own allowed range in a `RangeHint` line, and a
-   value typed outside that range is highlighted amber and clamped
-   down to the nearest bound on blur/Enter.
-   ============================================================ */
-
-// Format a bound for the range hint without float noise: 1/60 → 0.017,
-// 1/3600 → 0.000278, 8758.8 → 8758.8, 90 → 90, null → ∞.
 function fmtBound(v) {
   if (v == null) return "∞";
   if (Number.isInteger(v)) return String(v);
@@ -74,8 +57,6 @@ function fmtBound(v) {
   return String(Number(v.toFixed(d)));
 }
 
-// The "what am I allowed to type here" line under each editable field,
-// e.g. "range 0–90 kW · step 1".
 function RangeHint({ min, max, step, unit, extra }) {
   const parts = [];
   if (min != null || max != null) {
@@ -105,20 +86,12 @@ function numInputStyle(highlight, warn) {
   };
 }
 
-// A single free-typing numeric field. Keeps a local draft string so partial
-// input (e.g. "-" while typing "-5", or a trailing "." ) doesn't get
-// clamped or reverted mid-keystroke. Commit happens on blur or Enter:
-//   - empty / non-numeric  → revert to the last good value
-//   - outside [min, max]   → clamp to the nearest bound
-//   - otherwise            → onChange with the parsed number
 function NumField({
   value, min, max, width = 84, highlight, onChange, warnOutOfRange = true,
 }) {
   const [draft, setDraft] = React.useState(String(value));
   const [focused, setFocused] = React.useState(false);
 
-  // Re-sync from the store whenever the value changes underneath us, but
-  // never while the user is actively typing in this field.
   React.useEffect(() => {
     if (!focused) setDraft(String(value));
   }, [value, focused]);
@@ -159,7 +132,6 @@ function NumField({
   );
 }
 
-// A row with an inline-editable number field, plus the range it accepts.
 function EditableRow({
   label, value, unit, note, highlight, min, max, step = 1,
   onChange, isDefault, onReset, width, hint,
@@ -186,8 +158,6 @@ function EditableRow({
   );
 }
 
-// A row editing a two-element [lo, hi] range with two free-typing fields.
-// The low field is capped at the current high, and vice versa.
 function EditableRangeRow({
   label, unit, note, values, min, max, step = 1, onChange, isDefault, onReset,
 }) {
@@ -215,7 +185,6 @@ function EditableRangeRow({
   );
 }
 
-// Editable list of diesel genset sizes (kW each), with add/remove.
 function DieselGensetsRow({ values, defaultValues, onChange, onReset }) {
   const isDefault = values.length === defaultValues.length && values.every((v, i) => v === defaultValues[i]);
   return (
@@ -266,8 +235,6 @@ function DieselGensetsRow({ values, defaultValues, onChange, onReset }) {
   );
 }
 
-// Row for editing a fraction (0–1) as a whole percent, e.g. gust probability
-// or load-split shares. The range hint is expressed in percent.
 function EditablePercentRow({ label, note, fraction, min = 0, max = 100, onChange, isDefault, onReset, highlight }) {
   return (
     <EditableRow
@@ -347,6 +314,12 @@ export default function ParametersPage({
     const a = baseConfig[field], b = defaultBaseConfig[field];
     return a[0] === b[0] && a[1] === b[1];
   };
+
+  // Detect whether the floored runway is materially higher than the raw
+  // value — if so, the tile is a lower bound and worth flagging.
+  const runwayFloored = snapshot.runway;
+  const runwayRaw = snapshot.runwayRaw;
+  const runwayIsFloored = Number.isFinite(runwayRaw) && runwayRaw > runwayFloored * 1.05;
 
   return (
     <div>
@@ -431,7 +404,19 @@ export default function ParametersPage({
             </div>
             <div style={{ flex: 1, minWidth: 220 }}>
               <Row label="Battery SOC" value={round(snapshot.soc, 1)} unit="%" />
-              <Row label="Fuel runway" value={round(snapshot.runway, 1)} unit="days" />
+              <Row
+                label="Fuel runway (floored)"
+                value={round(snapshot.runway, 1)}
+                unit="days"
+                note={runwayIsFloored ? "lower bound — real burn rate is below the floor" : "no floor applied"}
+              />
+              <Row
+                label="Fuel runway (raw)"
+                value={Number.isFinite(runwayRaw) ? round(runwayRaw, 1) : "∞"}
+                unit="days"
+                highlight
+                note="un-floored — shows the actual burn rate"
+              />
             </div>
           </div>
         </Section>
@@ -565,7 +550,8 @@ export default function ParametersPage({
         it; a value outside the listed range is flagged amber and clamped to the nearest allowed bound.
         Press Escape while editing to cancel. Fields with a "reset" link have drifted from their factory
         default; the Live Snapshot and the chart's technical caps stay read-only since they're pure outputs
-        or safety limits rather than inputs.
+        or safety limits rather than inputs. The raw fuel runway is the un-floored estimate — if it is much
+        larger than the floored value, the floored figure is a lower bound rather than a true measurement.
       </div>
     </div>
   );
