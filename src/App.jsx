@@ -3,6 +3,7 @@ import {
   AreaChart, Area, LineChart, Line, XAxis, YAxis, Tooltip, ReferenceLine,
   ResponsiveContainer, CartesianGrid, ReferenceDot,
 } from "recharts";
+import RenewablesPage from "./RenewablesPage";
 
 /* ============================================================
    STATION CONFIGS — mirrors the Python generator's parameters
@@ -563,6 +564,7 @@ function SmallButton({ onClick, active, disabled, title, children }) {
    MAIN DASHBOARD
    ============================================================ */
 export default function PolarTwinDashboard() {
+  const [page, setPage] = useState("dashboard"); // "dashboard" | "renewables"
   const [station, setStation] = useState("maitri");
   const [windOn, setWindOn] = useState(true);
   const [solarOn, setSolarOn] = useState(true);
@@ -623,6 +625,19 @@ export default function PolarTwinDashboard() {
 
   const config = STATIONS[station];
   const env = envByStation[station];
+
+  // Theoretical turbine power curve for the current wind capacity — a pure
+  // function of speed, independent of time/weather. Sampled finely (0.2
+  // m/s steps) from 0 up to just past cut-out so the chart traces the full
+  // cut-in -> cubic ramp -> rated plateau -> cut-out shape cleanly.
+  const windCurveData = useMemo(() => {
+    const capacity = effectiveConfig.windCapacity;
+    const pts = [];
+    for (let s = 0; s <= 30; s += 0.2) {
+      pts.push({ speed: Math.round(s * 10) / 10, output: Math.round(windOutputKw(s, capacity) * 10) / 10 });
+    }
+    return pts;
+  }, [effectiveConfig.windCapacity]);
 
   // Continuously-updated "where is live now" position, used to bound
   // accelerated playback when the full-year timeline isn't unlocked.
@@ -781,6 +796,8 @@ export default function PolarTwinDashboard() {
       renewables: Math.round(interpAtHour(dispatch.pv, t, env.stepHours) + interpAtHour(dispatch.wind, t, env.stepHours)),
       diesel: Math.round(interpAtHour(dispatch.dieselOut, t, env.stepHours)),
       soc: Math.round(interpAtHour(dispatch.batterySoc, t, env.stepHours)),
+      windSpeed: Math.round(interpAtHour(env.windSpeed, t, env.stepHours) * 10) / 10,
+      windOutput: Math.round(interpAtHour(dispatch.wind, t, env.stepHours)),
     });
   }
   const tickInterval = Math.max(0, Math.floor(chartData.length / 7) - 1);
@@ -883,6 +900,28 @@ export default function PolarTwinDashboard() {
           </div>
         </div>
 
+        {/* Page tabs */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+          <ModeButton active={page === "dashboard"} onClick={() => setPage("dashboard")}>Dashboard</ModeButton>
+          <ModeButton active={page === "renewables"} onClick={() => setPage("renewables")}>🌬 Renewable Resources</ModeButton>
+        </div>
+
+        {page === "renewables" && (
+          <RenewablesPage
+            config={effectiveConfig}
+            stationName={config.name}
+            snapshot={snapshot}
+            windCurveData={windCurveData}
+            chartData={chartData}
+            historyWindowHours={historyWindowHours}
+            fmtWindowLabel={fmtWindowLabel}
+            fmtAxisTick={fmtAxisTick}
+            tickInterval={tickInterval}
+            simIndexFloat={simIndexFloat}
+          />
+        )}
+
+        {page === "dashboard" && (<>
         {/* Seed panel */}
         <div style={{
           display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16, alignItems: "center",
@@ -1185,6 +1224,7 @@ export default function PolarTwinDashboard() {
           "Regenerate" for a new random seed, or enter your own seed above. Data resolution controls how often that
           dataset is actually sampled across the year (default: hourly) — use "Set to default" to return to that.
         </div>
+        </>)}
       </div>
     </div>
   );
