@@ -118,7 +118,12 @@ const MIN_SAMPLE_SECONDS = 1; // finest gap between plotted points — at most 1
 // zoom/window above — the chart always interpolates smoothly between
 // whatever samples exist, at any zoom level. This setting controls how
 // coarse or fine those underlying samples are.
-const DEFAULT_STEP_MINUTES = 60; // 1 sample per hour, matching the original behavior
+const FACTORY_DEFAULT_STEP_MINUTES = 60; // 1 sample per hour, matching the original behavior
+// Alias kept so existing default-arg usage (generateEnvironment's signature,
+// etc.) keeps working unchanged. The "default resolution" shown/edited on
+// the Parameters page is now a piece of *state* (see defaultStepMinutes
+// below) — this constant only serves as the factory-reset target for it.
+const DEFAULT_STEP_MINUTES = FACTORY_DEFAULT_STEP_MINUTES;
 const MIN_STEP_MINUTES = 5;
 const MAX_STEP_MINUTES = 10080; // 1 week
 const STEP_PRESETS = [
@@ -747,6 +752,13 @@ export default function PolarTwinDashboard() {
   // sampled for display). The physics always runs at SIM_STEP_MINUTES
   // internally; this only controls the aggregation/sampling layer.
   const [stepMinutes, setStepMinutes] = useState(DEFAULT_STEP_MINUTES);
+  // What "default" means for the sample-resolution setting above. This used
+  // to be the fixed DEFAULT_STEP_MINUTES constant; it's now editable state
+  // itself (per the Parameters page's "Default resolution" field), so the
+  // user can redefine what "use default"/"Default All" resets resolution to.
+  // FACTORY_DEFAULT_STEP_MINUTES remains the true factory-reset target for
+  // this value.
+  const [defaultStepMinutes, setDefaultStepMinutes] = useState(FACTORY_DEFAULT_STEP_MINUTES);
   const [customStepOn, setCustomStepOn] = useState(false);
   const [customStepValue, setCustomStepValue] = useState(1);
   const [customStepUnit, setCustomStepUnit] = useState("hours");
@@ -1028,17 +1040,22 @@ export default function PolarTwinDashboard() {
     setHistoryWindowHours(hrs);
   };
 
-  const isDefaultStep = stepMinutes === DEFAULT_STEP_MINUTES && !customStepOn;
+  const isDefaultStep = stepMinutes === defaultStepMinutes && !customStepOn;
   const applyCustomStep = () => {
     const mins = clamp(Math.round((Number(customStepValue) || 0) * STEP_UNIT_MINUTES[customStepUnit]), MIN_STEP_MINUTES, MAX_STEP_MINUTES);
     setStepMinutes(mins);
   };
   const useDefaultStep = () => {
-    setStepMinutes(DEFAULT_STEP_MINUTES);
+    setStepMinutes(defaultStepMinutes);
     setCustomStepOn(false);
     setCustomStepValue(1);
     setCustomStepUnit("hours");
   };
+  // Editing "Default resolution" itself just redefines the target — it does
+  // NOT retroactively change the currently-active sample resolution.
+  const updateDefaultStepMinutes = (v) =>
+    setDefaultStepMinutes(clamp(Math.round(v), MIN_STEP_MINUTES, MAX_STEP_MINUTES));
+  const resetDefaultStepMinutes = () => setDefaultStepMinutes(FACTORY_DEFAULT_STEP_MINUTES);
 
   /* ----------------------------------------------------------------
      Handlers for the newly-editable Parameters-page fields
@@ -1128,7 +1145,8 @@ export default function PolarTwinDashboard() {
       [station]: { pv: DEFAULT_STATIONS[station].pvCapacity, wind: DEFAULT_STATIONS[station].windCapacity },
     }));
     setSeeds(DEFAULT_SEEDS);
-    setStepMinutes(DEFAULT_STEP_MINUTES);
+    setDefaultStepMinutes(FACTORY_DEFAULT_STEP_MINUTES);
+    setStepMinutes(FACTORY_DEFAULT_STEP_MINUTES);
     setCustomStepOn(false);
     setCustomStepValue(1);
     setCustomStepUnit("hours");
@@ -1238,6 +1256,10 @@ export default function PolarTwinDashboard() {
             isDefaultStep={isDefaultStep}
             onStepMinutesChange={(v) => setStepMinutes(clamp(Math.round(v), MIN_STEP_MINUTES, MAX_STEP_MINUTES))}
             onUseDefaultStep={useDefaultStep}
+            defaultStepMinutes={defaultStepMinutes}
+            isDefaultStepMinutesFactory={defaultStepMinutes === FACTORY_DEFAULT_STEP_MINUTES}
+            onDefaultStepMinutesChange={updateDefaultStepMinutes}
+            onResetDefaultStepMinutes={resetDefaultStepMinutes}
             historyWindowHours={historyWindowHours}
             onHistoryWindowHoursChange={(v) => setHistoryWindowHours(clamp(v, MIN_WINDOW_HOURS, MAX_WINDOW_HOURS))}
             onResetHistoryWindowHours={resetZoom}

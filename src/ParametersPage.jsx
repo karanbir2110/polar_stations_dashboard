@@ -355,6 +355,7 @@ export default function ParametersPage({
   effectiveConfig, onEffectiveCapacityChange, onResetEffectiveCapacity,
   seed, isDefaultSeed, onSeedChange, onUseDefaultSeed, onRegenerateSeed,
   stepMinutesSetting, stepHoursActive, samplesPerYear, isDefaultStep, onStepMinutesChange, onUseDefaultStep,
+  defaultStepMinutes, isDefaultStepMinutesFactory, onDefaultStepMinutesChange, onResetDefaultStepMinutes,
   historyWindowHours, onHistoryWindowHoursChange, onResetHistoryWindowHours,
   mode, onModeChange, hoursPerSec, onHoursPerSecChange,
   windOn, onWindOnChange, solarOn, onSolarOnChange,
@@ -518,7 +519,15 @@ export default function ParametersPage({
           <Row label="Sample resolution (active)" value={round(stepHoursActive * 60, 1)} unit="min/sample" highlight />
           <Row label="Samples generated this year" value={samplesPerYear.toLocaleString()} unit="pts" />
           <Row label="Default seed pair" value={`${DEFAULT_SEEDS.maitri} / ${DEFAULT_SEEDS.bharati}`} note="maitri / bharati" />
-          <Row label="Default resolution" value={DEFAULT_STEP_MINUTES} unit="min" />
+          <EditableRow
+            label="Default resolution" unit="min" value={defaultStepMinutes}
+            min={MIN_STEP_MINUTES} max={MAX_STEP_MINUTES} step={1}
+            note={isDefaultStepMinutesFactory ? "factory default" : "custom default"}
+            hint="what 'use default' / Default All resets resolution to"
+            onChange={onDefaultStepMinutesChange}
+            isDefault={isDefaultStepMinutesFactory}
+            onReset={onResetDefaultStepMinutes}
+          />
         </Section>
       </div>
 
