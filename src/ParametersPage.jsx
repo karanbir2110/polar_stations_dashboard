@@ -338,7 +338,7 @@ function ExportCsvButton({ onClick }) {
   return (
     <button
       onClick={onClick}
-      title="Export the full year of simulated 5-minute data (temperature, wind, solar, dispatch, battery, fuel — same columns as the training dataset) as a CSV file"
+      title="Export a full year of simulated data at the currently active sample resolution (temperature, wind, solar, dispatch, battery, fuel — same columns as the training dataset) as a CSV file. Change 'Sample resolution' above to change the row spacing."
       style={{
         display: "flex", alignItems: "center", gap: 6, flexShrink: 0,
         padding: "8px 14px", borderRadius: 8, cursor: "pointer",
@@ -365,7 +365,7 @@ export default function ParametersPage({
   dispatchParams, defaultDispatchParams, onDispatchParamChange, onResetDispatchParam,
   windCurveParams, defaultWindCurveParams, onWindCurveParamChange, onResetWindCurveParam,
   onResetAll,
-  fineEnv, fineDispatch,
+  csvEnv, csvDispatch,
   constants,
 }) {
   const {
@@ -393,12 +393,14 @@ export default function ParametersPage({
   const runwayRaw = snapshot.runwayRaw;
   const runwayIsFloored = Number.isFinite(runwayRaw) && runwayRaw > runwayFloored * 1.05;
 
-  // Builds one row per underlying physics sample (fineEnv/fineDispatch run
-  // at the fixed SIM_STEP_MINUTES resolution, for the full simulated year)
+  // Builds one row per sample AT THE CURRENTLY ACTIVE OUTPUT RESOLUTION
+  // (csvEnv/csvDispatch — the same aggregated data driving the charts),
   // with the exact same columns as the maitri_2026_synthetic.csv training
   // dataset: timestamp, station, weather/environment inputs, dispatch
-  // outputs, battery state, and fuel — so this export can be used directly
-  // as training data and reflects whatever seed/config is active right now.
+  // outputs, battery state, and fuel. Change "Sample resolution (setting)"
+  // above and the export follows — e.g. set it to 90 min and each CSV row
+  // will be 90 minutes apart. It also reflects whatever seed/config is
+  // active right now.
   const DATASET_CSV_HEADER = [
     "timestamp", "station", "temperature_c", "wind_speed_ms", "weather",
     "solar_irradiance_wm2", "pv_output_kw", "wind_output_kw", "total_load_kw",
@@ -410,10 +412,10 @@ export default function ParametersPage({
 
   const buildDatasetCsvRows = () => {
     const rows = [DATASET_CSV_HEADER];
-    if (!fineEnv || !fineDispatch) return rows;
+    if (!csvEnv || !csvDispatch) return rows;
 
-    const { temperature, windSpeed, weather, irradiance, totalLoad, loadBreakdown, stepHours } = fineEnv;
-    const { pv, wind, dieselOut, batterySoc, batteryFlow, unmet, fuelBurnL, tankLevelL, fuelRunwayDays, notes } = fineDispatch;
+    const { temperature, windSpeed, weather, irradiance, totalLoad, loadBreakdown, stepHours } = csvEnv;
+    const { pv, wind, dieselOut, batterySoc, batteryFlow, unmet, fuelBurnL, tankLevelL, fuelRunwayDays, notes } = csvDispatch;
     const n = temperature.length;
 
     for (let i = 0; i < n; i++) {
@@ -448,7 +450,8 @@ export default function ParametersPage({
 
   const handleExportCsv = () => {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    downloadCsv(`${stationKey}-dataset-seed${seed}-${stamp}.csv`, buildDatasetCsvRows());
+    const resTag = `${round(stepHoursActive * 60, 1)}min`;
+    downloadCsv(`${stationKey}-dataset-seed${seed}-${resTag}-${stamp}.csv`, buildDatasetCsvRows());
   };
 
   return (
